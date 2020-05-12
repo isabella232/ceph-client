@@ -45,6 +45,7 @@ static void ceph_put_super(struct super_block *s)
 
 	dout("put_super\n");
 	ceph_mdsc_close_sessions(fsc->mdsc);
+	ceph_fscache_put_super(s);
 }
 
 static int ceph_statfs(struct dentry *dentry, struct kstatfs *buf)

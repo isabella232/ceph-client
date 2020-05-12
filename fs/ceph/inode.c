@@ -550,6 +550,8 @@ void ceph_evict_inode(struct inode *inode)
 	percpu_counter_dec(&mdsc->metric.total_inodes);
 
 	truncate_inode_pages_final(&inode->i_data);
+	if (inode->i_state & I_PINNING_FSCACHE_WB)
+		ceph_fscache_unuse_cookie(inode, true);
 	clear_inode(inode);
 
 	ceph_fscache_unregister_inode_cookie(ci);
@@ -616,16 +618,23 @@ int ceph_fill_file_size(struct inode *inode, int issued,
 {
 	struct ceph_inode_info *ci = ceph_inode(inode);
 	int queue_trunc = 0;
+	loff_t oldsize = i_size_read(inode);
 
 	if (ceph_seq_cmp(truncate_seq, ci->i_truncate_seq) > 0 ||
-	    (truncate_seq == ci->i_truncate_seq && size > inode->i_size)) {
-		dout("size %lld -> %llu\n", inode->i_size, size);
+	    (truncate_seq == ci->i_truncate_seq && size > oldsize)) {
+		dout("size %lld -> %llu\n", oldsize, size);
 		if (size > 0 && S_ISDIR(inode->i_mode)) {
 			pr_err("fill_file_size non-zero size for directory\n");
 			size = 0;
 		}
 		i_size_write(inode, size);
 		inode->i_blocks = calc_inode_blocks(size);
+		/*
+		 * If we're truncating up, then we should be able to just update
+		 * the existing cookie. Otherwise, we need to invalidate.
+		 */
+		if (size > oldsize)
+			ceph_fscache_update(inode);
 		ci->i_reported_size = size;
 		if (truncate_seq != ci->i_truncate_seq) {
 			dout("truncate_seq %u -> %u\n",
@@ -658,10 +667,6 @@ int ceph_fill_file_size(struct inode *inode, int issued,
 		     truncate_size);
 		ci->i_truncate_size = truncate_size;
 	}
-
-	if (queue_trunc)
-		ceph_fscache_invalidate(inode);
-
 	return queue_trunc;
 }
 
@@ -1022,6 +1027,8 @@ int ceph_fill_inode(struct inode *inode, struct page *locked_page,
 	}
 
 	spin_unlock(&ci->i_ceph_lock);
+
+	ceph_fscache_register_inode_cookie(inode);
 
 	if (fill_inline)
 		ceph_fill_inline_data(inode, locked_page,
@@ -1789,11 +1796,13 @@ bool ceph_inode_set_size(struct inode *inode, loff_t size)
 	spin_lock(&ci->i_ceph_lock);
 	dout("set_size %p %llu -> %llu\n", inode, inode->i_size, size);
 	i_size_write(inode, size);
+	ceph_fscache_update(inode);
 	inode->i_blocks = calc_inode_blocks(size);
 
 	ret = __ceph_should_report_size(ci);
 
 	spin_unlock(&ci->i_ceph_lock);
+
 	return ret;
 }
 
@@ -1885,6 +1894,8 @@ static void ceph_do_invalidate_pages(struct inode *inode)
 	u32 orig_gen;
 	int check = 0;
 
+	ceph_fscache_invalidate(inode, 0);
+
 	mutex_lock(&ci->i_truncate_mutex);
 
 	if (READ_ONCE(fsc->mount_state) >= CEPH_MOUNT_SHUTDOWN) {
@@ -1944,6 +1955,7 @@ void __ceph_do_pending_vmtruncate(struct inode *inode)
 	u64 to;
 	int wrbuffer_refs, finish = 0;
 
+	ceph_fscache_resize(inode);
 	mutex_lock(&ci->i_truncate_mutex);
 retry:
 	spin_lock(&ci->i_ceph_lock);
@@ -2037,6 +2049,7 @@ int __ceph_setattr(struct inode *inode, struct iattr *attr)
 	int err = 0;
 	int inode_dirty_flags = 0;
 	bool lock_snap_rwsem = false;
+	bool fscache_resize = false;
 
 	prealloc_cf = ceph_alloc_cap_flush();
 	if (!prealloc_cf)
@@ -2138,6 +2151,7 @@ int __ceph_setattr(struct inode *inode, struct iattr *attr)
 		if ((issued & CEPH_CAP_FILE_EXCL) &&
 		    attr->ia_size > inode->i_size) {
 			i_size_write(inode, attr->ia_size);
+			fscache_resize = true;
 			inode->i_blocks = calc_inode_blocks(attr->ia_size);
 			ci->i_reported_size = attr->ia_size;
 			dirtied |= CEPH_CAP_FILE_EXCL;
@@ -2216,6 +2230,8 @@ int __ceph_setattr(struct inode *inode, struct iattr *attr)
 	if (inode_dirty_flags)
 		__mark_inode_dirty(inode, inode_dirty_flags);
 
+	if (fscache_resize)
+		ceph_fscache_resize(inode);
 
 	if (mask) {
 		req->r_inode = inode;
