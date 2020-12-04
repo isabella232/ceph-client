@@ -1567,9 +1567,10 @@ static vm_fault_t ceph_page_mkwrite(struct vm_fault *vmf)
 	loff_t off = page_offset(page);
 	loff_t size = i_size_read(inode);
 	size_t len;
-	int want, got, err;
+	int want, got = 0, err;
 	sigset_t oldset;
 	vm_fault_t ret = VM_FAULT_SIGBUS;
+	bool dirty_page = false;
 
 	prealloc_cf = ceph_alloc_cap_flush();
 	if (!prealloc_cf)
@@ -1588,7 +1589,7 @@ static vm_fault_t ceph_page_mkwrite(struct vm_fault *vmf)
 		if (locked_page)
 			unlock_page(locked_page);
 		if (err < 0)
-			goto out_free;
+			goto out;
 	}
 
 	if (off + PAGE_SIZE <= size)
@@ -1603,11 +1604,10 @@ static vm_fault_t ceph_page_mkwrite(struct vm_fault *vmf)
 	else
 		want = CEPH_CAP_FILE_BUFFER;
 
-	got = 0;
 	err = ceph_get_caps(vma->vm_file, CEPH_CAP_FILE_WR, want, off + len,
 			    &got, NULL);
 	if (err < 0)
-		goto out_free;
+		goto out;
 
 	dout("page_mkwrite %p %llu~%zd got cap refs on %s\n",
 	     inode, off, len, ceph_cap_string(got));
@@ -1630,7 +1630,7 @@ static vm_fault_t ceph_page_mkwrite(struct vm_fault *vmf)
 		snapc = ceph_find_incompatible(page);
 		if (!snapc) {
 			/* success.  we'll keep the page locked. */
-			set_page_dirty(page);
+			dirty_page = true;
 			ret = VM_FAULT_LOCKED;
 			break;
 		}
@@ -1662,10 +1662,13 @@ static vm_fault_t ceph_page_mkwrite(struct vm_fault *vmf)
 
 	dout("page_mkwrite %p %llu~%zd dropping cap refs on %s ret %x\n",
 	     inode, off, len, ceph_cap_string(got), ret);
-	ceph_put_cap_refs(ci, got);
-out_free:
-	ceph_restore_sigs(&oldset);
+out:
 	sb_end_pagefault(inode->i_sb);
+	if (dirty_page)
+		set_page_dirty(page);
+	if (got)
+		ceph_put_cap_refs(ci, got);
+	ceph_restore_sigs(&oldset);
 	ceph_free_cap_flush(prealloc_cf);
 	if (err < 0)
 		ret = vmf_error(err);
