@@ -491,6 +491,39 @@ TRACE_EVENT(cachefiles_link,
 		      __entry->backer)
 	    );
 
+TRACE_EVENT(cachefiles_map,
+	    TP_PROTO(struct cachefiles_object *obj,
+		     unsigned short tag,
+		     unsigned short gran,
+		     unsigned short size,
+		     const void *map),
+
+	    TP_ARGS(obj, tag, gran, size, map),
+
+	    TP_STRUCT__entry(
+		    __field(unsigned int,			obj	)
+		    __field(unsigned short,			tag	)
+		    __field(unsigned short,			gran	)
+		    __field(unsigned short,			size	)
+		    __field(unsigned long long,			map	)
+			     ),
+
+	    TP_fast_assign(
+		    __entry->obj	= obj->fscache.debug_id;
+		    __entry->tag	= tag;
+		    __entry->gran	= gran;
+		    __entry->size	= size;
+		    memcpy(&__entry->map, map, min_t(unsigned int, size, 8));
+			   ),
+
+	    TP_printk("o=%08x t=%x g=%x s=%x map=%8phN",
+		      __entry->obj,
+		      __entry->tag,
+		      __entry->gran,
+		      __entry->size,
+		      &__entry->map)
+	    );
+
 #endif /* _TRACE_CACHEFILES_H */
 
 /* This part must be outside protection */

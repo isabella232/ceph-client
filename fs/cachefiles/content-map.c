@@ -49,6 +49,8 @@ static bool cachefiles_granule_is_present(struct cachefiles_object *object,
 	if (granule / 8 >= object->content_map_size)
 		return false;
 	read_lock_bh(&object->content_map_lock);
+	trace_cachefiles_map(object, 0, granule,
+			     object->content_map_size, object->content_map);
 	res = test_bit_le(granule, object->content_map);
 	read_unlock_bh(&object->content_map_lock);
 	return res;
@@ -293,6 +295,8 @@ void cachefiles_mark_content_map(struct cachefiles_object *object,
 			if (granule / 8 >= object->content_map_size)
 				break;
 
+			trace_cachefiles_map(object, 1, granule,
+					     object->content_map_size, object->content_map);
 			set_bit_le(granule, object->content_map);
 			object->content_map_changed = true;
 			start += CACHEFILES_GRAN_SIZE;
@@ -331,6 +335,8 @@ void cachefiles_expand_content_map(struct cachefiles_object *object, loff_t i_si
 	if (size > object->content_map_size) {
 		zap = object->content_map;
 		memcpy(map, zap, object->content_map_size);
+		trace_cachefiles_map(object, 2, object->content_map_size,
+				     size, map);
 		object->content_map = map;
 		object->content_map_size = size;
 	} else {
@@ -376,6 +382,9 @@ void cachefiles_shorten_content_map(struct cachefiles_object *object,
 			size_t byte = (granules_needed - 1) / 8;
 			unsigned int shift = granules_needed % 8;
 			unsigned int mask = (1 << shift) - 1;
+			trace_cachefiles_map(object, 3, granules_needed,
+					     object->content_map_size,
+					     object->content_map);
 			object->content_map[byte] &= mask;
 		}
 	}
@@ -420,6 +429,7 @@ bool cachefiles_load_content_map(struct cachefiles_object *object)
 	cachefiles_begin_secure(cache, &saved_cred);
 	got = vfs_getxattr(object->dentry, cachefiles_xattr_content_map,
 			   map, size);
+	trace_cachefiles_map(object, 4, got, size, map);
 	cachefiles_end_secure(cache, saved_cred);
 	if (got < 0 && got != -ENODATA) {
 		kfree(map);
